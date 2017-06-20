@@ -1,0 +1,783 @@
+Index: GMap.NET.Core/GMap.NET.Internals/Core.cs
+===================================================================
+--- GMap.NET.Core/GMap.NET.Internals/Core.cs	(revision 36985)
++++ GMap.NET.Core/GMap.NET.Internals/Core.cs	(working copy)
+@@ -487,22 +487,25 @@
+       /// </summary>
+       public void ReloadMap()
+       {
+-         lock(tileLoadQueue)
++         if (started)
+          {
+-            tileLoadQueue.Clear();
+-         }
++            lock (tileLoadQueue)
++            {
++               tileLoadQueue.Clear();
++            }
+ 
+-         Matrix.Clear();
++            Matrix.Clear();
+ 
+-         if(OnNeedInvalidation != null)
+-         {
+-            OnNeedInvalidation();
+-         }
++            if (OnNeedInvalidation != null)
++            {
++               OnNeedInvalidation();
++            }
+ 
+-         UpdateBaunds();
++            UpdateBaunds();
+ 
+-         // start loading
+-         RunAsyncTasks();
++            // start loading
++            RunAsyncTasks();
++         }
+       }
+ 
+       /// <summary>
+@@ -575,42 +578,48 @@
+       /// </summary>
+       public void CancelAsyncTasks()
+       {
+-         if(loader.IsBusy)
++         if (started)
+          {
+-            loader.CancelAsync();
+-         }
++            if (loader.IsBusy && !loader.CancellationPending)
++            {
++               loader.CancelAsync();
++            }
+ 
+-         if(loader2.IsBusy)
+-         {
+-            loader2.CancelAsync();
+-         }
++            if (loader2.IsBusy && !loader2.CancellationPending)
++            {
++               loader2.CancelAsync();
++            }
+ 
+-         if(loader3.IsBusy)
+-         {
+-            loader3.CancelAsync();
++            if (loader3.IsBusy && !loader3.CancellationPending)
++            {
++               loader3.CancelAsync();
++            }
+          }
+       }
+ 
+       /// <summary>
+       /// runs tile loaders and bounds checker
+       /// </summary>
+-      void RunAsyncTasks()
+-      {
+-         if(!loader.IsBusy)
+-         {
+-            loader.RunWorkerAsync();
+-         }
++		void RunAsyncTasks()
++		{
++		   if (started)
++		   {
++		      if (!loader.IsBusy)
++		      {
++		         loader.RunWorkerAsync();
++		      }
+ 
+-         if(!loader2.IsBusy)
+-         {
+-            loader2.RunWorkerAsync();
+-         }
++		      if (!loader2.IsBusy)
++		      {
++		         loader2.RunWorkerAsync();
++		      }
+ 
+-         if(!loader3.IsBusy)
+-         {
+-            loader3.RunWorkerAsync();
+-         }
+-      }
++		      if (!loader3.IsBusy)
++		      {
++		         loader3.RunWorkerAsync();
++		      }
++		   }
++		}
+ 
+       // loader1
+       void loader_DoWork(object sender, DoWorkEventArgs e)
+Index: GMap.NET.Core/GMap.NET/MouseWheelZoomType.cs
+===================================================================
+--- GMap.NET.Core/GMap.NET/MouseWheelZoomType.cs	(revision 36985)
++++ GMap.NET.Core/GMap.NET/MouseWheelZoomType.cs	(working copy)
+@@ -15,5 +15,10 @@
+       /// zooms map to current view center
+       /// </summary>
+       ViewCenter,
++
++      /// <summary>
++      /// zooms map to current mouse position but retains local position relationship
++      /// </summary>
++      MousePositionRelative,
+    }
+ }
+Index: GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapMarker.cs
+===================================================================
+--- GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapMarker.cs	(revision 36985)
++++ GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapMarker.cs	(working copy)
+@@ -7,7 +7,7 @@
+    /// <summary>
+    /// GMap.NET marker
+    /// </summary>
+-   public class GMapMarker : INotifyPropertyChanged
++   public class GMapMarker : INotifyPropertyChanged, System.IComparable
+    {
+       public event PropertyChangedEventHandler PropertyChanged;
+       void OnPropertyChanged(string name)
+@@ -19,7 +19,11 @@
+          }
+       }
+ 
+-      internal GMapOverlay Overlay;
++      protected GMapOverlay Overlay;
++      public void ResetOverlay(GMapOverlay overlay)
++      {
++         this.Overlay = overlay;
++      }
+ 
+       private PointLatLng position;
+       public PointLatLng Position
+@@ -34,7 +38,7 @@
+ 
+             if(Overlay != null)
+             {
+-               GMap.NET.Point p = Overlay.Control.FromLatLngToLocal(value);
++               GMap.NET.Point p = Overlay.MapControl.FromLatLngToLocal(value);
+                LocalPosition = new Point(p.X + Offset.X, p.Y  + Offset.Y);
+             }
+          }
+@@ -68,7 +72,7 @@
+ 
+             if(Overlay != null)
+             {
+-               Overlay.Control.Core_OnNeedInvalidation();
++               Overlay.MapControl.Core_OnNeedInvalidation();
+             }
+          }
+       }
+@@ -85,7 +89,7 @@
+          }
+       }
+ 
+-      internal Rectangle LocalArea
++      public Rectangle LocalArea
+       {
+          get
+          {
+@@ -142,6 +146,28 @@
+       {
+          //
+       }
++
++      #region IComparable Members
++
++      public virtual int CompareTo(object obj)
++      {
++         int res = 0;
++         GMapMarker rhs = obj as GMapMarker;
++         if (rhs != null)
++         {
++            if (this.ToolTipText != null)
++               res = this.ToolTipText.CompareTo(rhs.ToolTipText);
++            if (res == 0)
++               res = this.LocalPosition.X.CompareTo(rhs.LocalPosition.X);
++            if (res == 0)
++               res = this.LocalPosition.Y.CompareTo(rhs.LocalPosition.Y);
++         }
++         else
++            res = -1;
++         return res;         
++      }
++
++      #endregion
+    }
+ 
+    public delegate void MarkerClick(GMapMarker item);
+Index: GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapOverlay.cs
+===================================================================
+--- GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapOverlay.cs	(revision 36985)
++++ GMap.NET.WindowsForms/GMap.NET.WindowsForms/GMapOverlay.cs	(working copy)
+@@ -6,6 +6,15 @@
+    using System.Windows.Forms;
+    using GMap.NET.ObjectModel;
+ 
++   public enum MultiToolTipModes
++   {
++      Vertical,
++      AngleInOut,
++      Arc,
++      ArcVertical,
++      SingleBox
++   }
++
+    /// <summary>
+    /// GMap.NET overlay
+    /// </summary>
+@@ -52,11 +61,11 @@
+       public StringFormat TooltipFormat = new StringFormat();
+ 
+       Pen RoutePen = new Pen(Color.MidnightBlue);
+-      internal System.Windows.Forms.GMapControl Control;
++      public readonly System.Windows.Forms.GMapControl MapControl;
+ 
+       public GMapOverlay(System.Windows.Forms.GMapControl control, string id)
+       {
+-         Control = control;
++         MapControl = control;
+          Id = id;
+          Markers.CollectionChanged += new NotifyCollectionChangedEventHandler(Markers_CollectionChanged);
+          Routes.CollectionChanged += new NotifyCollectionChangedEventHandler(Routes_CollectionChanged);
+@@ -72,36 +81,40 @@
+          TooltipFormat.LineAlignment = StringAlignment.Center;
+       }
+ 
+-      void Routes_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
++      protected void Routes_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+       {
+-         if(e.NewItems != null)
++         if (e.NewItems != null)
+          {
+-            foreach(GMapRoute obj in e.NewItems)
++            foreach (GMapRoute route in e.NewItems)
+             {
+-               Control.UpdateRouteLocalPosition(obj);
++               if (route != null)
++               {
++                  MapControl.UpdateRouteLocalPosition(route);
++               }
+             }
+-         }  
++         }
+ 
+-         Control.Core_OnNeedInvalidation();
++         MapControl.Core_OnNeedInvalidation();
+       }
+ 
+-      void Markers_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
++      protected void Markers_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+       {
+-         if(e.NewItems != null)
++         if (e.NewItems != null)
+          {
+-            foreach(GMapMarker obj in e.NewItems)
++            foreach (GMapMarker marker in e.NewItems)
+             {
+-               if(obj != null)
++               if (marker != null)
+                {
+-                  obj.Overlay = this;
+-                  obj.Position = obj.Position;
++                  marker.ResetOverlay(this);
++                  marker.Position = marker.Position;
+                }
+             }
+          }
+ 
+-         Control.Core_OnNeedInvalidation();
++         MapControl.Core_OnNeedInvalidation();
+       }
+ 
++      public MultiToolTipModes MultiToolTipMode = MultiToolTipModes.ArcVertical;
+       /// <summary>
+       /// draws tooltip, override to draw custom
+       /// </summary>
+@@ -115,7 +128,7 @@
+          g.SmoothingMode = SmoothingMode.AntiAlias;
+ 
+          System.Drawing.Size st = g.MeasureString(m.ToolTipText, TooltipFont).ToSize();
+-         System.Drawing.Rectangle rect = new System.Drawing.Rectangle(x, y, st.Width+Control.TooltipTextPadding.Width, st.Height+Control.TooltipTextPadding.Height);
++         System.Drawing.Rectangle rect = new System.Drawing.Rectangle(x, y, st.Width + MapControl.TooltipTextPadding.Width, st.Height + MapControl.TooltipTextPadding.Height);
+          rect.Offset(m.ToolTipOffset.X, m.ToolTipOffset.Y);
+ 
+          g.DrawLine(TooltipPen, x, y, rect.X + rect.Width/2, rect.Y + rect.Height/2);
+@@ -125,7 +138,158 @@
+ 
+          g.Restore(s);
+       }
++      protected virtual void DrawMultiToolTips(Graphics g, System.Collections.Generic.List<GMapMarker> lst)
++      {
++         if (lst == null)
++            return;
++         if (lst.Count < 1)
++            return;
++         if (lst.Count == 1)
++         {
++            GMapMarker m = lst[0];
++            DrawToolTip(g, m, m.LocalPosition.X, m.LocalPosition.Y);
++            return;
++         }
+ 
++         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
++
++         if (MultiToolTipMode == MultiToolTipModes.SingleBox)
++         {
++            string tt = string.Empty;
++            foreach (GMapMarker mm in lst)
++               tt += mm.ToolTipText + "\n";
++
++            tt = tt.Trim();
++            System.Drawing.Size st = g.MeasureString(tt, TooltipFont).ToSize();
++            GMapMarker m = lst[0];
++            System.Drawing.Rectangle rect = new System.Drawing.Rectangle(
++               m.LocalPosition.X, m.LocalPosition.Y - (st.Height / 2),
++               st.Width + this.MapControl.TooltipTextPadding.Width,
++               st.Height + this.MapControl.TooltipTextPadding.Height);
++
++            rect.Offset(m.ToolTipOffset.X, m.ToolTipOffset.Y);
++            g.DrawLine(TooltipPen, m.LocalPosition.X, m.LocalPosition.Y, rect.X, rect.Y + rect.Height / 2);
++            g.FillRectangle(TooltipBackground, rect);
++            g.DrawRectangle(TooltipPen, rect);
++            g.DrawString(tt, TooltipFont, Brushes.Navy, rect, TooltipFormat);
++            return;
++         }
++
++
++         //Sort by vertical position.  Some 2D-graphics wizard may know how to efficiently 
++         //organize all this so that the tooltip lines do not cross each other excessively
++         //or perhaps this is a complex task of no great display advantage...
++         lst.Sort
++         (
++            delegate(GMapMarker a, GMapMarker b)
++            {
++               return a.LocalPosition.Y.CompareTo(b.LocalPosition.Y);
++            }
++         );
++
++         int mid = lst.Count / 2;
++         int betweenboxpixel = 0;
++         int height = 0;
++         int right = int.MinValue;
++         int bottom = int.MaxValue;
++         int avgY = 0;
++         foreach (GMapMarker m in lst)
++         {
++            System.Drawing.Size st = g.MeasureString(m.ToolTipText, TooltipFont).ToSize();
++            height += st.Height;
++
++            //Could just use the 1st item but I'm minmaxavging
++            if (right < m.LocalPosition.X + m.ToolTipOffset.X)
++               right = m.LocalPosition.X + m.ToolTipOffset.X;
++            if (bottom > m.LocalPosition.Y - m.ToolTipOffset.Y)
++               bottom = m.LocalPosition.Y - m.ToolTipOffset.Y;
++            avgY += m.LocalPosition.Y;
++         }
++         avgY = avgY / lst.Count; //only interesting if the items have large hot-spot-areas.
++         System.Drawing.Point center = new System.Drawing.Point(right, avgY);
++
++         int top = bottom - (height / 2 + (mid * (this.MapControl.TooltipTextPadding.Height + betweenboxpixel)));
++
++         //use count + 1 so the range is fixed to 1..5 oclock instead of noon..6.
++         double radconv = (360d / (lst.Count + 1)) * System.Math.PI / 180d; //just 1 half
++         //double radconv = (360d / (lst.Count - 1)) * System.Math.PI / 180d; //just 1 half
++         for (int idx = 0; idx < lst.Count; idx++)
++         {
++            int fx = idx;
++            if (idx >= mid && MultiToolTipMode == MultiToolTipModes.Arc)
++            {
++               //draw from top to middle-1, then bottom to middle to get the correct
++               //display of z-order of overlapping items as you would expect.
++               fx = ((lst.Count - 1) - (idx - mid));
++            }
++            GMapMarker m = lst[fx];
++
++            int cx = right;
++            int cy = top;
++
++            if (MultiToolTipMode == MultiToolTipModes.Arc
++               || MultiToolTipMode == MultiToolTipModes.ArcVertical)
++            {
++               double xradius = 40d;
++               double yradius = System.Math.Max(40d, height / 2d); //adjust: /3d condense, 1.8d expand
++               double rads = (fx + 1) / 2d * radconv; //only use half the circle so div/2
++               //double rads = fx / 2d * radconv; //only use half the circle so div/2
++               double eX = xradius * System.Math.Sin(rads); //note ovalness of (h/4d)...
++               cx = (int)xradius + center.X + (int)eX;
++               if (MultiToolTipMode == MultiToolTipModes.Arc)
++               {
++                  double eY = yradius * System.Math.Cos(rads);
++                  cy = center.Y - (int)eY;
++               }
++            }
++            else if (MultiToolTipMode == MultiToolTipModes.AngleInOut)
++            {
++               cx = right - (10 * System.Math.Abs(lst.Count / 2 - idx));
++            }
++
++            System.Drawing.Size st = g.MeasureString(m.ToolTipText, TooltipFont).ToSize();
++            System.Drawing.Rectangle rect = new System.Drawing.Rectangle(cx, cy,
++               st.Width + this.MapControl.TooltipTextPadding.Width,
++               st.Height + this.MapControl.TooltipTextPadding.Height);
++
++            rect.Offset(0, rect.Height / -2);
++
++            top += rect.Height + betweenboxpixel; //move down for next item
++
++            g.DrawLine(TooltipPen, m.LocalPosition.X, m.LocalPosition.Y, rect.X, rect.Y + rect.Height / 2);
++            g.FillRectangle(TooltipBackground, rect);
++            g.DrawRectangle(TooltipPen, rect);
++            g.DrawString(m.ToolTipText, TooltipFont, Brushes.Navy, rect, TooltipFormat);
++
++         }
++      }
++      protected virtual void DrawToolTips(Graphics g)
++      {
++         // tooltips
++         System.Collections.Generic.List<GMapMarker> tipitems = new System.Collections.Generic.List<GMapMarker>();
++         foreach (GMapMarker m in Markers)
++         {
++            if (m.Visible
++                && m.TooltipMode != MarkerTooltipMode.Never
++                && g.ClipBounds.Contains(m.LocalPosition.X, m.LocalPosition.Y)
++                && !string.IsNullOrEmpty(m.ToolTipText))
++            {
++               if (m.IsMouseOver)
++                  tipitems.Add(m);
++               else if (m.TooltipMode == MarkerTooltipMode.Always)
++                  DrawToolTip(g, m, m.LocalPosition.X, m.LocalPosition.Y);
++               else if (MapControl.SelectedArea.Contains(m.Position))
++                  DrawToolTip(g, m, m.LocalPosition.X, m.LocalPosition.Y);
++            }
++         }
++
++         if (tipitems.Count > 0)
++         {
++            DrawMultiToolTips(g, tipitems);
++            tipitems.Clear();
++         }
++      }
++
+       /// <summary>
+       /// draw routes, override to draw custom
+       /// </summary>
+@@ -166,42 +330,31 @@
+          g.Restore(st);
+       }
+ 
++      protected virtual void DrawMarkers(Graphics g)
++      {
++         foreach (GMapMarker m in Markers)
++         {
++            if (m.Visible && MapControl.Core.CurrentRegion.Contains(m.LocalPosition.X, m.LocalPosition.Y))
++            {
++               m.OnRender(g);
++            }
++         }
++      }
+       /// <summary>
+       /// renders objects and routes
+       /// </summary>
+       /// <param name="g"></param>
+       internal void Render(Graphics g)
+       {
+-         if(Control.RoutesEnabled)
++         if (MapControl.RoutesEnabled)
+          {
+             DrawRoutes(g);
+          }
+ 
+-         if(Control.MarkersEnabled)
++         if (MapControl.MarkersEnabled)
+          {
+-            // markers
+-            foreach(GMapMarker m in Markers)
+-            {
+-               if(m.Visible && Control.Core.CurrentRegion.Contains(m.LocalPosition.X, m.LocalPosition.Y))
+-               {
+-                  m.OnRender(g);
+-               }
+-            }
+-
+-            // tooltips above
+-            foreach(GMapMarker m in Markers)
+-            {
+-               if(m.Visible && Control.Core.CurrentRegion.Contains(m.LocalPosition.X, m.LocalPosition.Y))
+-               {
+-                  if(!string.IsNullOrEmpty(m.ToolTipText))
+-                  {
+-                     if(m.TooltipMode == MarkerTooltipMode.Always || (m.TooltipMode == MarkerTooltipMode.OnMouseOver && m.IsMouseOver))
+-                     {
+-                        DrawToolTip(g, m, m.LocalPosition.X, m.LocalPosition.Y);
+-                     }
+-                  }
+-               }
+-            }
++            DrawMarkers(g);
++            DrawToolTips(g);
+          }
+       }
+    }
+Index: GMap.NET.WindowsForms/System.Windows.Forms/GMapControl.cs
+===================================================================
+--- GMap.NET.WindowsForms/System.Windows.Forms/GMapControl.cs	(revision 36985)
++++ GMap.NET.WindowsForms/System.Windows.Forms/GMapControl.cs	(working copy)
+@@ -360,6 +360,35 @@
+          return false;
+       }
+ 
++      public void AdjustZoomForOverlaySizes(string overlayId)
++      {
++         foreach (GMapOverlay o in Overlays)
++         {
++            if (overlayId == null || o.Id == overlayId)
++            {
++               if (o.IsVisibile && o.Markers.Count > 0)
++               {
++                  foreach (GMapMarker m in o.Markers)
++                  {
++                     if (m.Visible && !m.Position.IsEmpty)
++                     {
++                        if (m.LocalPosition.Y - (m.Size.Height * 2) < 0)
++                        {
++                           Zoom--;
++                           break;
++                        }
++                        if (m.LocalPosition.X + m.Size.Width > this.Size.Width)
++                        {
++                           Zoom--;
++                           break;
++                        }
++                     }
++                  }
++               }
++            }
++         }
++      }
++
+       /// <summary>
+       /// zooms and centers all route
+       /// </summary>
+@@ -414,7 +443,7 @@
+                {
+                   foreach(GMapMarker m in o.Markers)
+                   {
+-                     if(m.Visible)
++                     if (m.Visible && !m.Position.IsEmpty)
+                      {
+                         // left
+                         if(m.Position.Lng < left)
+@@ -564,23 +593,23 @@
+       /// <returns></returns>
+       public Image ToImage()
+       {
++         return ToImage(ImageFormat.Png);
++      }
++
++      public Image ToImage(ImageFormat fmt)
++      {
+          Image ret = null;
+          try
+          {
+-            using(Bitmap bitmap = new Bitmap(Width, Height))
++            System.Drawing.Rectangle bitrect = new System.Drawing.Rectangle(0, 0, Width, Height);
++            using (Bitmap bitmap = new Bitmap(bitrect.Width, bitrect.Height))
+             {
+-               using(Graphics g = Graphics.FromImage(bitmap))
+-               {
+-                  using(Graphics gg = this.CreateGraphics())
+-                  {
+-                     g.CopyFromScreen(PointToScreen(new System.Drawing.Point()).X, PointToScreen(new System.Drawing.Point()).Y, 0, 0, new System.Drawing.Size(Width, Height));
+-                  }
+-               }
++               this.DrawToBitmap(bitmap, bitrect);
+ 
+-               //Convert the Image to a JPG
+-               using(MemoryStream ms = new MemoryStream())
++               //Convert the Image to specified format
++               using (MemoryStream ms = new MemoryStream())
+                {
+-                  bitmap.Save(ms, ImageFormat.Png);
++                  bitmap.Save(ms, fmt);
+                   ret = Image.FromStream(ms);
+                }
+             }
+@@ -709,42 +738,52 @@
+             #region -- draw scale --
+             if(MapScaleInfoEnabled)
+             {
+-               if(Width > Core.pxRes5000km)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes5000km, 10);
+-                  e.Graphics.DrawString("5000Km", ScaleFont, ScalePen.Brush, Core.pxRes5000km + 10, 11);
+-               }
+-               if(Width > Core.pxRes1000km)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes1000km, 10);
+-                  e.Graphics.DrawString("1000Km", ScaleFont, ScalePen.Brush, Core.pxRes1000km + 10, 11);
+-               }
+-               if(Width > Core.pxRes100km && Zoom > 2)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes100km, 10);
+-                  e.Graphics.DrawString("100Km", ScaleFont, ScalePen.Brush, Core.pxRes100km + 10, 11);
+-               }
+-               if(Width > Core.pxRes10km && Zoom > 5)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes10km, 10);
+-                  e.Graphics.DrawString("10Km", ScaleFont, ScalePen.Brush, Core.pxRes10km + 10, 11);
+-               }
+-               if(Width > Core.pxRes1000m && Zoom >= 10)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes1000m, 10);
+-                  e.Graphics.DrawString("1000m", ScaleFont, ScalePen.Brush, Core.pxRes1000m + 10, 11);
+-               }
+-               if(Width > Core.pxRes100m && Zoom > 11)
+-               {
+-                  e.Graphics.DrawRectangle(ScalePen, 10, 10, Core.pxRes100m, 10);
+-                  e.Graphics.DrawString("100m", ScaleFont, ScalePen.Brush, Core.pxRes100m + 9, 11);
+-               }
++               PaintScale(e.Graphics, Core.pxRes5000km, "5000", "km");
++               PaintScale(e.Graphics, Core.pxRes1000km, "1000", "km");
++               PaintScale(e.Graphics, Core.pxRes100km,   "100", "km");
++               //PaintScale(e.Graphics, Core.pxRes100km / 2,"50", "km");
++               PaintScale(e.Graphics, Core.pxRes100km / 4,"25", "km");
++               PaintScale(e.Graphics, Core.pxRes10km,     "10", "km");
++               PaintScale(e.Graphics, Core.pxRes10km / 2,  "5", "km");
++               PaintScale(e.Graphics, Core.pxRes10km / 10, "1", "km");
++
++               //PaintScale(e.Graphics, Core.pxRes100m*2,   "200", "m");
++               PaintScale(e.Graphics, Core.pxRes100m,     "100", "m");
++               //PaintScale(e.Graphics, Core.pxRes100m / 2,  "50", "m");
++               PaintScale(e.Graphics, Core.pxRes100m / 4,  "25", "m");
++               PaintScale(e.Graphics, Core.pxRes100m / 10, "10", "m");
++               //PaintScale(e.Graphics, Core.pxRes100m / 20,  "5", "m");
++               //PaintScale(e.Graphics, Core.pxRes100m / 100, "1", "m");
+             }
+             #endregion
+          }
+          base.OnPaint(e);
+       }
+ 
++      public bool MapScaleInfoMetric = true;
++      protected void PaintScale(Graphics g, int pxReskm, string pxLabel, string pxUOM)
++      {
++         int px = pxReskm;
++         if (!MapScaleInfoMetric)
++         {
++            if (pxUOM == "m")
++            {
++               px = (int)(pxReskm / 1.0936133d);
++               pxUOM = "yd";
++            }
++            else if (pxUOM == "km")
++            {
++               px = (int)(pxReskm / 0.621371192d);
++               pxUOM = "mi";
++            }
++         }
++         if (px > 10 && px < Width)
++         {
++            g.DrawRectangle(ScalePen, 10, 10, px, 10);
++            g.DrawString(pxLabel + pxUOM, ScaleFont, ScalePen.Brush, px + 10, 11);
++         }
++      }
++
+       protected override void OnSizeChanged(EventArgs e)
+       {
+          base.OnSizeChanged(e);
+@@ -888,14 +927,17 @@
+                         {
+                            if(m.LocalArea.Contains(e.X, e.Y))
+                            {
+-                              this.Cursor = System.Windows.Forms.Cursors.Hand;
+-                              m.IsMouseOver = true;
+-                              IsMouseOverMarker = true;
+-                              Invalidate(false);
++                              if (!m.IsMouseOver)
++                              {
++                                 this.Cursor = System.Windows.Forms.Cursors.Hand;
++                                 m.IsMouseOver = true;
++                                 IsMouseOverMarker = true;
++                                 Invalidate(false);
+ 
+-                              if(OnMarkerEnter != null)
+-                              {
+-                                 OnMarkerEnter(m);
++                                 if (OnMarkerEnter != null)
++                                 {
++                                    OnMarkerEnter(m);
++                                 }
+                               }
+                            }
+                            else if(m.IsMouseOver)
+@@ -923,32 +965,44 @@
+       {
+          base.OnMouseWheel(e);
+ 
+-         if(!IsMouseOverMarker && !IsDragging)
++         //if(!IsMouseOverMarker && !IsDragging)
++         if (!IsDragging)
+          {
+-            if(MouseWheelZoomType == MouseWheelZoomType.MousePosition)
+-            {
+-               Core.currentPosition = FromLocalToLatLng(e.X, e.Y);
+-            }
+-            else if(MouseWheelZoomType == MouseWheelZoomType.ViewCenter)
+-            {
+-               Core.currentPosition = FromLocalToLatLng((int) Width/2, (int) Height/2);
+-            }
++            int newZoom = Zoom;
++            if (e.Delta > 0 && newZoom < MaxZoom)
++               newZoom++;
++            else if (e.Delta < 0 && newZoom > MinZoom)
++               newZoom--;
+ 
+-            // set mouse position to map center
+-            if(CenterPositionOnMouseWheel && !GMaps.Instance.IsRunningOnMono)
++            if (newZoom != Zoom)
+             {
+-               System.Drawing.Point p = PointToScreen(new System.Drawing.Point(Width/2, Height/2));
+-               Stuff.SetCursorPos((int) p.X, (int) p.Y);
+-            }
++               GMap.NET.Point pt = new GMap.NET.Point(e.X, e.Y);
+ 
+-            if(e.Delta > 0)
+-            {
+-               Zoom++;
++               if (MouseWheelZoomType == MouseWheelZoomType.MousePosition
++                  || MouseWheelZoomType == MouseWheelZoomType.MousePositionRelative)
++               {
++                  Core.currentPosition = FromLocalToLatLng(e.X, e.Y);
++               }
++               else if (MouseWheelZoomType == MouseWheelZoomType.ViewCenter)
++               {
++                  Core.currentPosition = FromLocalToLatLng((int)Width / 2, (int)Height / 2);
++               }
++
++               this.Zoom = newZoom;
++
++               // set mouse position to map center
++               if (CenterPositionOnMouseWheel) // && !GMaps.Instance.IsRunningOnMono)
++               {
++                  System.Drawing.Point p = PointToScreen(new System.Drawing.Point(Width / 2, Height / 2));
++                  Stuff.SetCursorPos((int)p.X, (int)p.Y);
++               }
++               else if (MouseWheelZoomType == MouseWheelZoomType.MousePositionRelative)
++               {
++                  Core.BeginDrag(new GMap.NET.Point((int)Width / 2, (int)Height / 2));
++                  Core.Drag(pt);
++                  Core.EndDrag();
++               }
+             }
+-            else if(e.Delta < 0)
+-            {
+-               Zoom--;
+-            }
+          }
+       }
+ 
